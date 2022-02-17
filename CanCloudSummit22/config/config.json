@@ -1,0 +1,18 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "2.0",
+  "bundles": {
+    "hello-canada-web-part": {
+      "components": [
+        {
+          "entrypoint": "./lib/webparts/helloCanada/HelloCanadaWebPart.js",
+          "manifest": "./src/webparts/helloCanada/HelloCanadaWebPart.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {
+    "HelloCanadaWebPartStrings": "lib/webparts/helloCanada/loc/{locale}.js"
+  }
+}

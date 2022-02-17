@@ -1,0 +1,298 @@
+name: deploy with cli m365
+
+on:
+  workflow_call:
+    inputs:
+      environment_name:
+        description: 'Target environment to deploy to'
+        required: true
+        type: string
+      spfx_package_name:
+        description: 'SPFx package solution name'
+        required: true
+        type: string
+      site_url_prd:
+        description: 'SharePoint PRD site URL'
+        required: true
+        type: string
+      site_list_prd:
+        description: 'SharePoint PRD list relative URL ("Lists/MyList")'
+        default: ""
+        required: false
+        type: string
+      site_name_prd:
+        description: 'SharePoint PRD name ("Contoso")'
+        default: ""
+        required: false
+        type: string
+      site_copy_owner:
+        description: 'SharePoint copy site owner to be'
+        default: ""
+        required: false
+        type: string
+      webpart_id:
+        description: 'SPFx WebPart ID to add to test page'
+        default: ""
+        required: false
+        type: string
+      site_to_remove:
+        description: 'SharePoint copy site url to remove'
+        default: ""
+        required: false
+        type: string
+      app_catalog_site_url:
+        description: 'SharePoint app catalog site URL (tenant or site collection)'
+        default: ""
+        required: false
+        type: string
+      app_catalog_scope:
+        description: 'Indicates the PRD app catalog scope (tenant or site collection)'
+        default: ""
+        required: false
+        type: string
+    outputs:
+      site_to_remove:
+        description: 'SharePoint copy site url to remove'
+        value: ${{ jobs.deploy.outputs.site_copy_url }}
+      sharepoint_package:
+        description: 'SharePoint Framework package name'
+        value: ${{ jobs.deploy.outputs.sppkg_name }}
+    secrets:
+      AAD_APP_ID:
+        required: true
+      AAD_APP_PASSWORD:
+        required: true
+      AAD_APP_ENCODED_CERTIFICATE:
+        required: true
+      AAD_APP_THUMBPRINT:
+        required: true
+      AAD_TENANT_ID:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: windows-2022
+    environment: ${{ inputs.environment_name }}
+    outputs:
+      site_copy_url: ${{ steps.step_site_copy.outputs.url }}
+      sppkg_name: ${{ inputs.spfx_package_name }}
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v2
+      
+      - name: Use Node 14.x
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+
+      - name: Install CLI for Microsoft 365
+        run: npm install -g @pnp/cli-microsoft365
+
+      - name: Login to Microsoft 365 with the CLI and set tenant context
+        shell: pwsh
+        run: |
+            m365 login --authType certificate --certificateBase64Encoded ${{ secrets.AAD_APP_ENCODED_CERTIFICATE }} --thumbprint ${{ secrets.AAD_APP_THUMBPRINT }} -p ${{ secrets.AAD_APP_PASSWORD }} --appId ${{ secrets.AAD_APP_ID }} --tenant ${{ secrets.AAD_TENANT_ID }}
+            $uri = [System.Uri]"${{ inputs.site_url_prd }}"
+            m365 spo set --url $($uri.Scheme + "://" + $uri.Authority)
+            m365 status
+            m365 spo get
+
+      - name: Configuring CLI for Microsoft 365 output error handling
+        shell: pwsh
+        run: |
+            m365 cli config set --key output --value json
+            m365 cli config set --key errorOutput --value stdout
+      
+      - name: Installing PnP.PowerShell Module
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: Install-Module -Name "PnP.PowerShell" -Force
+
+      - name: Connecting to Production site and get site template
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: |
+            $securePassword = ConvertTo-SecureString "${{ secrets.AAD_APP_PASSWORD }}" -AsPlainText -Force
+            Connect-PnPOnline -Url ${{ inputs.site_url_prd }} -CertificateBase64Encoded ${{ secrets.AAD_APP_ENCODED_CERTIFICATE }} -CertificatePassword $securePassword -ClientId ${{ secrets.AAD_APP_ID }} -Tenant ${{ secrets.AAD_TENANT_ID }}
+            Get-PnPSiteTemplate -Out template.pnp
+            Add-PnPDataRowsToSiteTemplate -Path template.pnp -List "${{ inputs.site_list_prd }}"
+
+      - name: Create ${{ inputs.environment_name }} site copy
+        if: ${{ inputs.environment_name != 'PRD' }}
+        id: step_site_copy
+        shell: pwsh
+        run: |
+            function Get-CLIValue {
+              [cmdletbinding()]
+              param(
+                [parameter(Mandatory = $true, ValueFromPipeline = $true)]
+                $input
+              )
+                $output = $input | ConvertFrom-Json
+                if ($output.error -ne $null) {
+                  throw $output.error
+                }
+                return $output
+            }
+
+            $siteName = "${{ inputs.site_name_prd }}-${{ inputs.environment_name }}" + [guid]::NewGuid().Guid
+            $siteUrl = "/sites/" + $siteName
+
+            try {
+              $site = m365 spo site add --type CommunicationSite --url $siteUrl --title $siteName --owners "${{ inputs.site_copy_owner }}" | Get-CLIValue
+              Write-Host "::set-output name=url::$site"
+              Write-Host $site
+            }
+            catch {
+              Write-Host $_.Exception.Message -ForegroundColor Yellow
+            }
+
+      - name: Apply PRD site template to ${{ inputs.environment_name }} site copy
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: |
+            $securePassword = ConvertTo-SecureString "${{ secrets.AAD_APP_PASSWORD }}" -AsPlainText -Force
+            Connect-PnPOnline -Url ${{ steps.step_site_copy.outputs.url }} -CertificateBase64Encoded ${{ secrets.AAD_APP_ENCODED_CERTIFICATE }} -CertificatePassword $securePassword -ClientId ${{ secrets.AAD_APP_ID }} -Tenant ${{ secrets.AAD_TENANT_ID }}
+
+            $applyTemplateHasFailed = $false
+
+            try {
+              Invoke-PnPSiteTemplate -Path template.pnp -ClearNavigation
+            }
+            catch {
+              Write-Host $_.Exception.Message -ForegroundColor Yellow
+
+              $applyTemplateHasFailed = $_.Exception.Message -Match "HttpClient.Timeout"
+            }
+            finally {
+              if ($applyTemplateHasFailed -eq $true) {
+                Write-Host "Retrying to apply PRD site template (after 30 seconds delay)"
+                Start-Sleep -Seconds 30
+                Invoke-PnPSiteTemplate -Path template.pnp -ClearNavigation
+              }
+            }
+
+      - name: Enable Site Collection App Catalog and upload SharePoint package
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: |
+            function Get-CLIValue {
+              [cmdletbinding()]
+              param(
+                [parameter(Mandatory = $true, ValueFromPipeline = $true)]
+                $input
+              )
+                $output = $input | ConvertFrom-Json
+                if ($output.error -ne $null) {
+                  throw $output.error
+                }
+                return $output
+            }
+
+            $uploadHasFailed = $false
+
+            try {
+              m365 spo site appcatalog add --url ${{ steps.step_site_copy.outputs.url }} | Get-CLIValue
+              $appId = m365 spo app add --filePath "artifact/${{ inputs.spfx_package_name }}" --appCatalogUrl ${{ steps.step_site_copy.outputs.url }} --scope sitecollection --debug | Get-CLIValue
+            }
+            catch {
+              Write-Host $_.Exception.Message -ForegroundColor Yellow
+              Write-Host "Retrying by removing and re-enabling the site collection app catalog, then the package (after 30 seconds delay)"
+              $uploadHasFailed = $true
+            }
+            finally {
+              if ($uploadHasFailed -eq $true) {
+                m365 spo site appcatalog remove --url ${{ steps.step_site_copy.outputs.url }}
+                m365 spo site appcatalog add --url ${{ steps.step_site_copy.outputs.url }}
+                Start-Sleep -Seconds 30
+                $appId = m365 spo app add --filePath "artifact/${{ inputs.spfx_package_name }}" --appCatalogUrl ${{ steps.step_site_copy.outputs.url }} --scope sitecollection --overwrite | Get-CLIValue
+              }
+            }
+
+            Write-Host "##vso[task.setvariable variable=packageId;isOutput=true]$uniqueId"
+
+      - name: Deploy SharePoint package and add it to the site
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: |
+            function Get-CLIValue {
+              [cmdletbinding()]
+              param(
+                [parameter(Mandatory = $true, ValueFromPipeline = $true)]
+                $input
+              )
+                $output = $input | ConvertFrom-Json
+                if ($output.error -ne $null) {
+                  throw $output.error
+                }
+                return $output
+            }
+
+            $deployHasFailed = $false
+
+            try {
+              m365 spo app deploy --name ${{ inputs.spfx_package_name }} --appCatalogUrl ${{ steps.step_site_copy.outputs.url }} --scope sitecollection | Get-CLIValue
+            }
+            catch {
+              Write-Host $_.Exception.Message -ForegroundColor Yellow
+              Write-Host "Retrying by adding once again the package and deploying it"
+              $deployHasFailed = $true
+            }
+            finally {
+              if ($deployHasFailed -eq $true) {
+                m365 spo app add --filePath "artifact/${{ inputs.spfx_package_name }}" --appCatalogUrl ${{ steps.step_site_copy.outputs.url }} --scope sitecollection --overwrite
+                m365 spo app deploy --name ${{ inputs.spfx_package_name }} --appCatalogUrl ${{ steps.step_site_copy.outputs.url }} --scope sitecollection
+              }
+            }
+
+      - name: Add an article page and the WebPart (if exists)
+        if: ${{ inputs.environment_name != 'PRD' }}
+        shell: pwsh
+        run: |
+            function Get-CLIValue {
+              [cmdletbinding()]
+              param(
+                [parameter(Mandatory = $true, ValueFromPipeline = $true)]
+                $input
+              )
+                $output = $input | ConvertFrom-Json
+                if ($output.error -ne $null) {
+                  throw $output.error
+                }
+                return $output
+            }
+
+            $webPartHasFailed = $false
+
+            if ('${{ inputs.webpart_id }}' -ne '') {
+              m365 spo page add -n "TestSPFx.aspx" -u ${{ steps.step_site_copy.outputs.url }}
+
+              try {
+                m365 spo page clientsidewebpart add -u ${{ steps.step_site_copy.outputs.url }} --pageName "TestSPFx.aspx" --webPartId ${{ inputs.webpart_id }} | Get-CLIValue
+              }
+              catch {
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                Write-Host "Retrying the WebPart addition after 30 seconds delay"
+
+                $webPartHasFailed = $true
+
+                Start-Sleep -Seconds 30
+              }
+              finally {
+                if ($webPartHasFailed -eq $true) {
+                  m365 spo page clientsidewebpart add -u ${{ steps.step_site_copy.outputs.url }} --pageName "TestSPFx.aspx" --webPartId ${{ inputs.webpart_id }} | Get-CLIValue
+                }
+              }
+            }
+
+      - name: Upload SharePoint package to ${{ inputs.app_catalog_scope }} App Catalog (PRD)
+        if: ${{ inputs.environment_name == 'PRD' }}
+        run: m365 spo app add --filePath "artifact/${{ inputs.spfx_package_name }}" --appCatalogUrl ${{ inputs.app_catalog_site_url }} --scope ${{ inputs.app_catalog_scope }} --overwrite
+
+      - name: Deploy SharePoint package (PRD)
+        if: ${{ inputs.environment_name == 'PRD' }}
+        run: m365 spo app deploy --name ${{ inputs.spfx_package_name }} --appCatalogUrl ${{ inputs.app_catalog_site_url }} --scope ${{ inputs.app_catalog_scope }}
+
+      - name: Remove site copy (PRD)
+        if: ${{ inputs.environment_name == 'PRD' }}
+        run: m365 spo site remove -u ${{ inputs.site_to_remove }} --skipRecycleBin --confirm --wait

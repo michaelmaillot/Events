@@ -1,0 +1,46 @@
+name: main
+on:
+  push:
+    branches: 
+      - main
+  workflow_dispatch:
+
+jobs:
+  build_spfx:
+    uses: [repo_owner_username]/[repo_name]/.github/workflows/build-spfx.yml@main
+  deploy_spfx_uat:
+    needs: build_spfx
+    uses: [repo_owner_username]/[repo_name]/.github/workflows/deploy-spfx-pnp-powershell.yml@main
+    # uses: [repo_owner_username]/[repo_name]/.github/workflows/deploy-spfx-cli-m365.yml@main
+    with:
+      environment_name: UAT
+      spfx_package_name: "${{ needs.build_spfx.outputs.package_name }}"
+      site_url_prd: https://contoso.sharepoint.com/sites/CommSite
+      site_list_prd: Lists/EmployeeOnboarding
+      site_name_prd: CommSite
+      site_copy_owner: meganb@contoso.onmicrosoft.com
+      webpart_name: HelloCanada
+      # webpart_id: 7f14e608-e109-4ec5-8bc5-f66764f01d7d
+    secrets:
+      AAD_APP_ID: ${{ secrets.AAD_APP_ID }}
+      AAD_APP_PASSWORD: ${{ secrets.AAD_APP_PASSWORD }}
+      AAD_APP_ENCODED_CERTIFICATE: ${{ secrets.AAD_APP_ENCODED_CERTIFICATE }}
+      # AAD_APP_THUMBPRINT: ${{ secrets.AAD_APP_THUMBPRINT }}
+      AAD_TENANT_ID: ${{ secrets.AAD_TENANT_ID }}
+  deploy_spfx_prd:
+    needs: deploy_spfx_uat
+    uses: [repo_owner_username]/[repo_name]/.github/workflows/deploy-spfx-pnp-powershell.yml@main
+    # uses: [repo_owner_username]/[repo_name]/.github/workflows/deploy-spfx-cli-m365.yml@main
+    with:
+      environment_name: PRD
+      spfx_package_name: "${{ needs.deploy_spfx_uat.outputs.sharepoint_package }}"
+      site_url_prd: https://contoso.sharepoint.com/sites/CommSite
+      site_to_remove: "${{ needs.deploy_spfx_uat.outputs.site_to_remove }}"
+      # app_catalog_site_url: https://contoso.sharepoint.com/sites/app
+      app_catalog_scope: tenant
+    secrets:
+      AAD_APP_ID: ${{ secrets.AAD_APP_ID }}
+      AAD_APP_PASSWORD: ${{ secrets.AAD_APP_PASSWORD }}
+      AAD_APP_ENCODED_CERTIFICATE: ${{ secrets.AAD_APP_ENCODED_CERTIFICATE }}
+      # AAD_APP_THUMBPRINT: ${{ secrets.AAD_APP_THUMBPRINT }}
+      AAD_TENANT_ID: ${{ secrets.AAD_TENANT_ID }}

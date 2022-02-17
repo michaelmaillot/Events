@@ -1,0 +1,55 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      include_tests:
+        description: 'Indicates whether build job has to run tests or not'
+        default: false
+        required: false
+        type: string
+    outputs:
+      package_name:
+        description: 'SPFx package name'
+        value: ${{ jobs.build.outputs.sppkg }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      sppkg: ${{ steps.step_package.outputs.package_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Use Node 14.x
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+          cache: 'npm'
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Bundle project
+        run: gulp bundle --ship
+
+      - name: npm test
+        if: ${{ inputs.include_tests == true }}
+        run: npm test
+
+      - name: Package solution
+        run: gulp package-solution --ship
+
+      - name: GetSharePointPackage
+        id: step_package
+        shell: pwsh
+        run: |
+            $package = Get-ChildItem -Path sharepoint/solution -Recurse -Filter '*.sppkg' | Select Name | Select-Object -First 1
+            echo "::set-output name=package_name::$($package.Name)"
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v2
+        with:
+          path: sharepoint/solution/*.sppkg
+      
