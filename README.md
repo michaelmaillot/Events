@@ -1,4 +1,4 @@
-# Events demo samples
+# Events demo / links samples
 
 Welcome on the Events repository!
 
